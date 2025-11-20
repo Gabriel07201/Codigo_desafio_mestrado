@@ -15,6 +15,10 @@ from torchvision import models, transforms
 from sklearn.svm import SVC
 from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import classification_report, ConfusionMatrixDisplay
+from skimage.feature import local_binary_pattern
+from scipy.signal import convolve2d
+from sklearn.model_selection import cross_val_score, StratifiedKFold
+
 
 import matplotlib.pyplot as plt
 
@@ -511,3 +515,154 @@ def plot_confusion_matrix_for_model(
     plt.title(title)
     plt.tight_layout()
     plt.show()
+
+
+# adicoes alem das funcoes pedidas
+
+# implementando LBP
+def compute_lbp_hist(gray_img: np.ndarray, P: int = 8, R: int = 1) -> np.ndarray:
+    """
+    gray_img: imagem em escala de cinza (np.uint8) 2D
+    Retorna: histograma LBP normalizado (shape: (59,))
+    """
+    lbp = local_binary_pattern(gray_img, P, R, method="uniform")
+
+    n_bins = P * (P - 1) + 3  # = 59 para P=8
+    hist, _ = np.histogram(
+        lbp.ravel(),
+        bins=np.arange(n_bins + 1),
+        range=(0, n_bins),
+        density=True,  # normalizado
+    )
+    return hist.astype(np.float32)
+
+
+# nova funcao para features
+def compute_texture_features_for_split(
+    samples,
+    resize_to: Tuple[int, int] | None = None,
+) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
+    """
+    Versão alternativa a compute_cnn_features_for_split,
+    """
+    label_map = {"Empty": 0, "Occupied": 1}
+
+    X_lbp_list = []
+    y_list = []
+
+    for s in samples:
+        img = Image.open(s.path).convert("L")  # escala de cinza
+
+        if resize_to is not None:
+            img = img.resize(resize_to, Image.BILINEAR)
+
+        img_np = np.array(img, dtype=np.uint8)
+
+        lbp_hist = compute_lbp_hist(img_np, P=8, R=1)
+
+        X_lbp_list.append(lbp_hist)
+        y_list.append(label_map[s.label])
+
+    X_lbp = np.vstack(X_lbp_list)
+    y = np.array(y_list, dtype=np.int64)
+
+    features_dict = {
+        "lbp": X_lbp,
+    }
+    return features_dict, y
+
+
+# validacao cruzada dos modelos
+def cross_validate_model(
+    X: np.ndarray,
+    y: np.ndarray,
+    algo_name: str = "SVM",
+    random_state: int = 42,
+    cv_splits: int = 5,
+):
+    """
+    Faz validação cruzada estratificada para um único algoritmo (SVM ou MLP)
+    em um conjunto de treino (X, y).
+
+    Retorna:
+      (mean_f1, std_f1)
+    """
+
+    if algo_name == "SVM":
+        model = SVC(
+            kernel="rbf",
+            C=10.0,
+            gamma="scale",
+            probability=False,
+        )
+    elif algo_name == "MLP":
+        model = MLPClassifier(
+            hidden_layer_sizes=(512,),
+            activation="relu",
+            solver="adam",
+            max_iter=50,
+            random_state=random_state,
+        )
+    else:
+        raise ValueError(f"Algo desconhecido: {algo_name}")
+
+    cv = StratifiedKFold(
+        n_splits=cv_splits,
+        shuffle=True,
+        random_state=random_state,
+    )
+
+    scores = cross_val_score(
+        model,
+        X,
+        y,
+        cv=cv,
+        scoring="f1_weighted",
+        n_jobs=2,
+    )
+
+    return scores.mean(), scores.std()
+
+
+def cross_validate_all(
+    datasets_fusions,
+    random_state: int = 42,
+    cv_splits: int = 5,
+):
+    """
+    Roda validação cruzada (apenas no treino) para:
+      - cada dataset (UFPR04, PUC, ...)
+      - cada fusão (concat, mean, sum, weighted)
+      - cada algoritmo (SVM, MLP)
+
+    Usando a função cross_validate_model.
+
+    Retorna:
+      df_cv: DataFrame com F1 médio e desvio padrão.
+    """
+    results = []
+    algos = ["SVM", "MLP"]
+
+    for dataset_name, fusions_dict in datasets_fusions.items():
+        for fusion_name, (X_train, X_test, y_train, y_test) in fusions_dict.items():
+            for algo in algos:
+                mean_f1, std_f1 = cross_validate_model(
+                    X_train,
+                    y_train,
+                    algo_name=algo,
+                    random_state=random_state,
+                    cv_splits=cv_splits,
+                )
+
+                results.append({
+                    "dataset": dataset_name,
+                    "fusion": fusion_name,
+                    "algo": algo,
+                    "cv_splits": cv_splits,
+                    "f1_cv_mean": mean_f1,
+                    "f1_cv_std": std_f1,
+                })
+                print(f"[CV] {dataset_name} | {fusion_name} | {algo} -> F1={mean_f1:.4f} ± {std_f1:.4f}")
+
+    df_cv = pd.DataFrame(results)
+    return df_cv
