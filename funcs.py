@@ -666,3 +666,221 @@ def cross_validate_all(
 
     df_cv = pd.DataFrame(results)
     return df_cv
+
+
+# evalue por clima
+def evaluate_by_weather_all(
+    models_dict,
+    datasets_fusions,
+    test_samples_dict,
+    average_key: str = "weighted avg",
+):
+    """
+    Avalia todos os modelos (SVM/MLP) por condição climática (weather),
+    tanto intra-dataset quanto cross-dataset.
+    """
+    results = []
+    dataset_names = list(datasets_fusions.keys())
+    algos = ["SVM", "MLP"]
+
+    for train_dataset in dataset_names:
+        for fusion_name in datasets_fusions[train_dataset].keys():
+            for algo in algos:
+                model_key = (train_dataset, algo, fusion_name)
+                if model_key not in models_dict:
+                    continue
+
+                model = models_dict[model_key]
+
+                for eval_dataset in dataset_names:
+                    # X_test, y_test do dataset de avaliação
+                    _, X_test, _, y_test = datasets_fusions[eval_dataset][fusion_name]
+                    samples = test_samples_dict[eval_dataset]
+
+                    assert X_test.shape[0] == len(samples), (
+                        f"Alinhamento incorreto entre X_test e samples em {eval_dataset}, fusão {fusion_name}"
+                    )
+
+                    y_pred = model.predict(X_test)
+
+                    weathers = [s.weather for s in samples]
+                    unique_weathers = sorted(set(weathers))
+
+                    for w in unique_weathers:
+                        idx = [i for i, ww in enumerate(weathers) if ww == w]
+                        if len(idx) == 0:
+                            continue
+
+                        y_true_w = y_test[idx]
+                        y_pred_w = y_pred[idx]
+
+                        report = classification_report(
+                            y_true_w,
+                            y_pred_w,
+                            target_names=["Empty", "Occupied"],
+                            output_dict=True,
+                            zero_division=0,
+                        )
+
+                        f1 = report[average_key]["f1-score"]
+
+                        results.append({
+                            "train_dataset": train_dataset,
+                            "eval_dataset": eval_dataset,
+                            "algo": algo,
+                            "fusion": fusion_name,
+                            "weather": w,
+                            "n_samples": len(idx),
+                            "f1_" + average_key.replace(" ", "_"): f1,
+                            "f1_macro": report["macro avg"]["f1-score"],
+                            "f1_weighted": report["weighted avg"]["f1-score"],
+                        })
+
+    df_weather = pd.DataFrame(results)
+    return df_weather
+
+
+# pegando erros do modelo
+def collect_errors_for_model(
+    models_dict,
+    datasets_fusions,
+    test_samples_dict,
+    train_dataset: str,
+    eval_dataset: str,
+    fusion_name: str,
+    algo: str,
+):
+    """
+    Gera um DataFrame com uma linha por amostra de teste, contendo:
+      - path, lot, weather, day
+      - rótulo verdadeiro (true_label)
+      - rótulo previsto (pred_label)
+      - se acertou (correct)
+      - tipo de erro
+    """
+    model_key = (train_dataset, algo, fusion_name)
+
+    model = models_dict[model_key]
+
+    _, X_test, _, y_test = datasets_fusions[eval_dataset][fusion_name]
+    samples = test_samples_dict[eval_dataset]
+
+    assert X_test.shape[0] == len(samples), (
+        f"Alinhamento incorreto entre X_test e samples em {eval_dataset}, fusão {fusion_name}"
+    )
+
+    y_pred = model.predict(X_test)
+
+    records = []
+    for i, (s, yt, yp) in enumerate(zip(samples, y_test, y_pred)):
+        true_label = "Occupied" if yt == 1 else "Empty"
+        pred_label = "Occupied" if yp == 1 else "Empty"
+
+        if yt == 1 and yp == 1:
+            err_type = "TP"
+        elif yt == 0 and yp == 0:
+            err_type = "TN"
+        elif yt == 0 and yp == 1:
+            err_type = "FP"
+        else:  # yt == 1 and yp == 0
+            err_type = "FN"
+
+        records.append({
+            "idx": i,
+            "path": s.path,
+            "lot": s.lot,
+            "weather": s.weather,
+            "day": s.day,
+            "true_label": true_label,
+            "pred_label": pred_label,
+            "correct": yt == yp,
+            "error_type": err_type,
+        })
+
+    df_errors = pd.DataFrame(records)
+    df_errors = df_errors.query("correct == False").reset_index(drop=True)
+    return df_errors
+
+
+def plot_error_examples(
+    df_errors: pd.DataFrame,
+    error_type: str = "FP",
+    n: int = 16,
+    random_state: int = 42,
+    figsize: tuple = (8, 8),
+):
+    """
+    Mostra um grid de imagens para um tipo de erro específico:
+      error_type: "FP" ou "FN"
+    """
+    subset = df_errors[df_errors["error_type"] == error_type]
+    if subset.empty:
+        print(f"Nenhum exemplo do tipo {error_type}.")
+        return
+
+    n = min(n, len(subset))
+    subset = subset.sample(n, random_state=random_state)
+
+    n_cols = int(np.ceil(np.sqrt(n)))
+    n_rows = int(np.ceil(n / n_cols))
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
+    axes = np.array(axes).reshape(-1)
+
+    for ax, (_, row) in zip(axes, subset.iterrows()):
+        img = Image.open(row["path"]).convert("RGB")
+        img = img.resize((224, 224), Image.BILINEAR)
+        ax.imshow(img)
+        ax.axis("off")
+        title = f"{row['error_type']} | true={row['true_label']} | pred={row['pred_label']}\n{row['weather']} - {row['day']}"
+        ax.set_title(title, fontsize=8)
+
+    # esconde eixos sobrando
+    for ax in axes[len(subset):]:
+        ax.axis("off")
+
+    plt.tight_layout()
+    plt.show()
+
+
+
+def evaluate_models_on_new_fusions(
+    models_dict,
+    new_fusions: Dict[str, tuple],
+    new_dataset_name: str = "NEW",
+    average_key: str = "weighted avg",
+):
+    """
+    Avalia TODOS os modelos em models_dict em um conjunto NOVO de dados
+    """
+    results = []
+
+    for (train_dataset, algo, fusion_name), model in models_dict.items():
+        # só avalia se existir essa fusão no novo conjunto
+        if fusion_name not in new_fusions:
+            continue
+
+        X_new, y_new = new_fusions[fusion_name]
+
+        y_pred = model.predict(X_new)
+
+        report = classification_report(
+            y_new,
+            y_pred,
+            target_names=["Empty", "Occupied"],
+            output_dict=True,
+            zero_division=0,
+        )
+
+        results.append({
+            "train_dataset": train_dataset,
+            "eval_dataset": new_dataset_name,
+            "algo": algo,
+            "fusion": fusion_name,
+            "f1_" + average_key.replace(" ", "_"): report[average_key]["f1-score"],
+            "f1_macro": report["macro avg"]["f1-score"],
+            "f1_weighted": report["weighted avg"]["f1-score"],
+        })
+
+    df_new_eval = pd.DataFrame(results)
+    return df_new_eval
