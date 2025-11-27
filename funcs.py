@@ -427,18 +427,12 @@ def train_models(
 def evaluate_models(
     models_dict,
     datasets_fusions,
-    eval_fusions: Dict[str, Dict[str, tuple]] | None = None,
     average_key: str = "weighted avg",
 ):
     """
     Avalia todos os modelos em:
-        intra-dataset
+        intra-dataset 
         cross-dataset
-
-    eval_fusions:
-      opcional. Dicionário de fusões para avaliação com todas as amostras do
-      domínio alvo. Estrutura: {dataset: {fusion_name: (X_eval, y_eval)}}.
-      Caso não seja fornecido, usa os X_test/y_test de datasets_fusions.
 
     average_key:
       qual linha do classification_report usar para o F1:
@@ -447,21 +441,6 @@ def evaluate_models(
     Retorna:
       df_results: DataFrame com F1 para cada combinação.
     """
-
-    def _get_eval_data(dataset: str, fusion: str):
-        """Retorna (X_eval, y_eval) para o dataset/fusão solicitados."""
-
-        if eval_fusions is not None:
-            X_eval, y_eval = eval_fusions[dataset][fusion]
-            return X_eval, y_eval
-
-        entry = datasets_fusions[dataset][fusion]
-        if len(entry) != 4:
-            raise ValueError(
-                "datasets_fusions deve possuir tuplas (X_train, X_test, y_train, y_test)"
-            )
-        _, X_test, _, y_test = entry
-        return X_test, y_test
 
     results = []
 
@@ -478,12 +457,13 @@ def evaluate_models(
                 model = models_dict[model_key]
 
                 for eval_dataset in dataset_names:
-                    X_eval, y_eval = _get_eval_data(eval_dataset, fusion_name)
+                    # pega o X_test e y_test do dataset de avaliação
+                    _, X_test, _, y_test = datasets_fusions[eval_dataset][fusion_name]
 
-                    y_pred = model.predict(X_eval)
+                    y_pred = model.predict(X_test)
 
                     report = classification_report(
-                        y_eval,
+                        y_test,
                         y_pred,
                         target_names=["Empty", "Occupied"],
                         output_dict=True,
